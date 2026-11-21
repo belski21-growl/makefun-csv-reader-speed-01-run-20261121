@@ -26,11 +26,16 @@
 //  - Fast record path: a record whose line holds no '"' and no stray CR
 //    is sliced whole and split(',') — all C-level work. That covers the
 //    large majority of records (plain int/decimal/date/code/word fields).
+//    The quote/CR checks use bounded indexOf from the record start, so
+//    the line is sliced only once, for the split itself (rev. pasca-buka
+//    21 Nov 14:2x WIB).
 //  - Slow path (records with quotes or stray CRs) still never walks
 //    character by character building strings: unquoted fields scan with
 //    one tight charCodeAt loop and slice once; quoted fields jump with
 //    indexOf('"') and slice, converting CR/CRLF inside quotes to LF only
-//    when the segment actually holds one.
+//    when the segment actually holds one (a CR-free segment skips both
+//    regex passes and only counts its LFs — rev. pasca-buka 21 Nov
+//    14:2x WIB).
 //  - No object is allocated per field; field end is carried in two
 //    locals (fval / fend).
 
@@ -118,9 +123,17 @@ export function run(input) {
 
   // Converts a quoted segment [a, b) the reference way: each CRLF or
   // lone CR inside it is one LF, and every such break counts a line.
+  // No CR in the segment is the common case (LF-only): skip both regex
+  // passes, count the LFs with an indexOf loop and return it unchanged.
   function conv(a, b) {
     const s = text.slice(a, b);
-    if (s.indexOf('\n') === -1 && s.indexOf('\r') === -1) return s;
+    if (s.indexOf('\r') === -1) {
+      let n = 0;
+      let i = s.indexOf('\n');
+      while (i !== -1) { n += 1; i = s.indexOf('\n', i + 1); }
+      line += n;
+      return s;
+    }
     const br = s.match(/\r\n|\r|\n/g);
     if (br) line += br.length;
     return s.replace(/\r\n?/g, '\n');
@@ -222,13 +235,14 @@ export function run(input) {
 
     // Fast record path: the record ends at the next LF, its line holds
     // no '"' and no stray CR (a CR only as the CRLF line ending).
+    // Bounded indexOf from pos (never slicing the line first): the only
+    // copy left is the one split(',') needs.
     const nl = text.indexOf('\n', pos);
     if (nl !== -1) {
-      const lineStr = text.slice(pos, nl);
-      const q = lineStr.indexOf('"');
-      const r = lineStr.indexOf('\r');
-      if (q === -1 && (r === -1 || r === lineStr.length - 1)) {
-        const body = r === -1 ? lineStr : lineStr.slice(0, -1);
+      const q = text.indexOf('"', pos);
+      const r = text.indexOf('\r', pos);
+      if ((q === -1 || q >= nl) && (r === -1 || r >= nl || r === nl - 1)) {
+        const body = r === nl - 1 ? text.slice(pos, nl - 1) : text.slice(pos, nl);
         pos = nl + 1;
         line += 1;
         if (body === '') continue; // a line holding only a stray CR
